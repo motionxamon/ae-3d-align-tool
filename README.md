@@ -4,6 +4,23 @@ Dockable After Effects ScriptUI panel that mirrors the basic Align panel, but al
 
 The panel uses compact embedded PNG icons instead of text labels. The icons are stored inside the `.jsx` as base64, so the panel is a single-file install.
 
+## Features
+
+- Aligns selected 2D and 3D layers in comp/screen space.
+- Supports common align buttons: left, horizontal center, right, top, vertical center, bottom.
+- Supports distribution controls for 2D/3D layer selections.
+- Reference modes: `Selection`, `Composition`, `Safe Margins`, `First Selected`, and `Selected Camera`.
+- Preserves 3D layer Z position while moving projected X/Y placement.
+- Supports animated Position by writing/updating a key at the current comp time.
+- Handles parented layers through local Position adjustments.
+- Includes active Add/Intersect-style mask bounds when calculating visible layer edges.
+
+## Compatibility
+
+- Adobe After Effects.
+- ScriptUI panel workflow.
+- Designed for 2D/3D layer layout work in active compositions.
+
 ## Install
 
 1. Copy `AE_3D_Align_Tool.jsx` into the After Effects `Scripts/ScriptUI Panels` folder.
@@ -38,6 +55,12 @@ You can also test quickly with `File > Scripts > Run Script File...`, but it wil
 - Selected Camera mode requires selecting a camera along with the layers.
 - Because perspective projection is nonlinear, each move is refined a few times. It should land closely for normal layout use, but very extreme camera angles can need another click.
 
+## Files
+
+- `AE_3D_Align_Tool.jsx` - the installable ScriptUI panel.
+- `tools/` - helper scripts used during icon generation.
+- `AE_3D_Align_Tool_icons__test/` - exported icon preview assets.
+
 ## Smoke test
 
 1. Create a comp.
@@ -46,3 +69,7 @@ You can also test quickly with `File > Scripts > Run Script File...`, but it wil
 4. Select them and open the panel.
 5. Use `Align Layers to: Composition`, then click horizontal center and vertical center.
 6. Switch to `Selection` and test left/right/top/bottom align plus distribute buttons.
+
+## Status
+
+Experimental production helper. Test on a copy of a project before using it on critical work.
