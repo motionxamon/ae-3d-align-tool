@@ -38,6 +38,7 @@ You can also test quickly with `File > Scripts > Run Script File...`, but it wil
 - Aligns and distributes in comp/screen X/Y.
 - Preserves each 3D layer's Z position.
 - Animated Position is supported: the tool writes/updates a Position key at the current comp time.
+- Position expressions are supported on a best-effort basis: the tool adjusts the underlying Position value while keeping the expression enabled.
 - Parented layers are moved through local Position adjustments derived from their projected comp movement.
 - With one selected layer, Align uses Composition as the reference, even if the dropdown is set to `Selection`.
 - `Align Layers to: Selection` uses the selection bounds when two or more layers are selected.
@@ -50,7 +51,8 @@ You can also test quickly with `File > Scripts > Run Script File...`, but it wil
 
 ## Current limitations
 
-- Camera, light, locked, separated Position, and expression-driven Position layers are skipped.
+- Camera, light, locked, and separated Position layers are skipped.
+- Position expressions that ignore `value` entirely cannot be visually moved without changing or disabling the expression.
 - Mask bounds are based on mask path vertices and tangent handles, not a rendered alpha scan.
 - Selected Camera mode requires selecting a camera along with the layers.
 - Because perspective projection is nonlinear, each move is refined a few times. It should land closely for normal layout use, but very extreme camera angles can need another click.

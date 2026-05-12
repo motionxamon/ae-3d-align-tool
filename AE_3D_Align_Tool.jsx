@@ -221,7 +221,7 @@
                 continue;
             }
             var pos = layer.property("ADBE Transform Group").property("ADBE Position");
-            if (pos && pos.value.length >= 2 && !pos.expressionEnabled && !pos.dimensionsSeparated) {
+            if (pos && pos.value.length >= 2 && !pos.dimensionsSeparated) {
                 layers.push(layer);
             }
         }
@@ -524,10 +524,29 @@
     }
 
     function getPositionValueAtCompTime(pos, comp) {
+        if (pos.expressionEnabled) {
+            return getPositionValueWithExpressionDisabled(pos, comp.time);
+        }
+        return getRawPositionValueAtTime(pos, comp.time);
+    }
+
+    function getRawPositionValueAtTime(pos, compTime) {
         if (pos.isTimeVarying) {
-            return pos.valueAtTime(comp.time, false);
+            return pos.valueAtTime(compTime, false);
         }
         return pos.value;
+    }
+
+    function getPositionValueWithExpressionDisabled(pos, compTime) {
+        var wasEnabled = pos.expressionEnabled;
+        var value;
+        try {
+            pos.expressionEnabled = false;
+            value = getRawPositionValueAtTime(pos, compTime);
+        } finally {
+            pos.expressionEnabled = wasEnabled;
+        }
+        return value;
     }
 
     function setPositionValue(pos, x, y, original, compTime) {
@@ -538,6 +557,24 @@
             value = [x, y];
         }
 
+        try {
+            setRawPositionValue(pos, value, compTime);
+        } catch (err) {
+            if (!pos.expressionEnabled) {
+                throw err;
+            }
+
+            var wasEnabled = pos.expressionEnabled;
+            try {
+                pos.expressionEnabled = false;
+                setRawPositionValue(pos, value, compTime);
+            } finally {
+                pos.expressionEnabled = wasEnabled;
+            }
+        }
+    }
+
+    function setRawPositionValue(pos, value, compTime) {
         if (pos.isTimeVarying) {
             pos.setValueAtTime(compTime, value);
         } else {
