@@ -1,0 +1,327 @@
+    function getPositionValueAtCompTime(pos, comp) {
+        return pos.valueAtTime(comp.time, true);
+    }
+
+    function setRawPositionValue(pos, value, compTime) {
+        if (pos.numKeys > 0) {
+            var k = pos.nearestKeyIndex(compTime);
+            if (Math.abs(pos.keyTime(k) - compTime) < 0.000001) pos.setValueAtKey(k, value);
+            else pos.setValueAtTime(compTime, value);
+        } else pos.setValue(value);
+    }
+
+    function snapshotPosition(pos, time) {
+        var state = {pos:pos, value:pos.valueAtTime(time, true), keys:[]};
+        for (var k = 1; k <= pos.numKeys; k++) {
+            var key = {time:pos.keyTime(k), value:pos.keyValue(k),
+                inType:pos.keyInInterpolationType(k), outType:pos.keyOutInterpolationType(k),
+                inEase:pos.keyInTemporalEase(k), outEase:pos.keyOutTemporalEase(k),
+                auto:pos.keyTemporalAutoBezier(k), continuous:pos.keyTemporalContinuous(k),
+                selected:pos.keySelected(k)};
+            if (pos.isSpatial) {
+                key.spatial = {inT:pos.keyInSpatialTangent(k), outT:pos.keyOutSpatialTangent(k),
+                    auto:pos.keySpatialAutoBezier(k), continuous:pos.keySpatialContinuous(k), roving:pos.keyRoving(k)};
+            }
+            if (pos.keyLabel) key.label = pos.keyLabel(k);
+            state.keys.push(key);
+        }
+        return state;
+    }
+
+    function restorePosition(state) {
+        var pos = state.pos, i, key;
+        for (i = pos.numKeys; i > 0; i--) pos.removeKey(i);
+        if (!state.keys.length) { pos.setValue(state.value); return; }
+        for (i = 0; i < state.keys.length; i++) pos.setValueAtTime(state.keys[i].time, state.keys[i].value);
+        for (i = 0; i < state.keys.length; i++) {
+            key = state.keys[i];
+            var k = i + 1;
+            pos.setInterpolationTypeAtKey(k, key.inType, key.outType);
+            pos.setTemporalEaseAtKey(k, key.inEase, key.outEase);
+            pos.setTemporalContinuousAtKey(k, key.continuous);
+            pos.setTemporalAutoBezierAtKey(k, key.auto);
+            if (key.spatial) {
+                pos.setSpatialContinuousAtKey(k, key.spatial.continuous);
+                pos.setSpatialTangentsAtKey(k, key.spatial.inT, key.spatial.outT);
+                pos.setSpatialAutoBezierAtKey(k, key.spatial.auto);
+            }
+            if (key.label !== undefined && pos.setLabelAtKey) pos.setLabelAtKey(k, key.label);
+            pos.setSelectedAtKey(k, key.selected);
+        }
+        for (i = 0; i < state.keys.length; i++) {
+            if (state.keys[i].spatial) pos.setRovingAtKey(i + 1, state.keys[i].spatial.roving);
+        }
+    }
+
+    function makeEvaluator(comp) {
+        var helper = comp.layers.addNull();
+        try {
+            helper.name = "__3D_ALIGN_EVAL__";
+            helper.guideLayer = true;
+            helper.shy = true;
+            helper.moveToEnd();
+            helper.property("ADBE Transform Group").property("ADBE Opacity").setValue(0);
+            var effect = helper.property("ADBE Effect Parade").addProperty("ADBE Point Control");
+            var point = effect.property(1);
+            return {geometry:[], point:function (expr) {
+                point.expression = expr;
+                var v = point.valueAtTime(comp.time, false);
+                if (point.expressionError) throw new Error(point.expressionError);
+                if (!isFinite(v[0]) || !isFinite(v[1])) throw new Error("Invalid projection.");
+                return [v[0], v[1]];
+            }, remove:function () { helper.remove(); }};
+        } catch (err) { helper.remove(); throw err; }
+    }
+
+    function pointExpr(layer, layerPointCode) {
+        return "var L=thisComp.layer(" + layer.index + ");var p=L.toComp(" + layerPointCode + ");[p[0],p[1]];";
+    }
+
+    function geometryForLayer(layer, evalr) {
+        for (var i = 0; i < evalr.geometry.length; i++) {
+            if (evalr.geometry[i].layer === layer) return evalr.geometry[i].points;
+        }
+        var points = maskGeometry(layer);
+        evalr.geometry.push({layer:layer, points:points});
+        return points;
+    }
+
+    function getLayerBounds(layer, evalr) {
+        var points = geometryForLayer(layer, evalr);
+        if (!points.length) throw new Error(layer.name + ": mask has no visible area.");
+        // All contour vertices are projected in one expression to avoid per-vertex host calls.
+        var data = [], i;
+        for (i = 0; i < points.length; i++) data.push("[" + points[i][0] + "," + points[i][1] + ",0]");
+        var prefix = "var L=thisComp.layer(" + layer.index + ");var pts=[" + data.join(",") + "];" +
+            "var lo=[1e30,1e30],hi=[-1e30,-1e30];" +
+            "for(var i=0;i<pts.length;i++){var p=L.toComp(pts[i]);lo=[Math.min(lo[0],p[0]),Math.min(lo[1],p[1])];hi=[Math.max(hi[0],p[0]),Math.max(hi[1],p[1])];}";
+        return boundsFromPoints([evalr.point(prefix + "lo;"), evalr.point(prefix + "hi;")]);
+    }
+
+    function flattenMask(shape) {
+        var result = [], verts = shape.vertices;
+        function mid(a,b) { return [(a[0]+b[0])/2,(a[1]+b[1])/2]; }
+        function curve(a,b,c,d,depth) {
+            var dx=d[0]-a[0], dy=d[1]-a[1], len=Math.sqrt(dx*dx+dy*dy);
+            var polygonLength = distance(a,b)+distance(b,c)+distance(c,d);
+            var flat = len > 0 ? Math.max(Math.abs(dy*(b[0]-a[0])-dx*(b[1]-a[1])),Math.abs(dy*(c[0]-a[0])-dx*(c[1]-a[1])))/len : polygonLength;
+            if (depth >= 14 || (flat <= 0.05 && polygonLength-len <= 0.05)) { result.push(a); return; }
+            var ab=mid(a,b),bc=mid(b,c),cd=mid(c,d),abc=mid(ab,bc),bcd=mid(bc,cd),m=mid(abc,bcd);
+            curve(a,ab,abc,m,depth+1); curve(m,bcd,cd,d,depth+1);
+        }
+        function distance(a,b) { var x=a[0]-b[0],y=a[1]-b[1]; return Math.sqrt(x*x+y*y); }
+        for(var i=0;i<verts.length;i++) {
+            var j=(i+1)%verts.length, a=verts[i], d=verts[j];
+            var ot=shape.outTangents[i], it=shape.inTangents[j];
+            curve(a,[a[0]+ot[0],a[1]+ot[1]],[d[0]+it[0],d[1]+it[1]],d,0);
+        }
+        return result;
+    }
+
+    function polygonOp(a, b, type) {
+        var c = new ClipperLib.Clipper(), result = [];
+        c.AddPaths(a, ClipperLib.PolyType.ptSubject, true);
+        c.AddPaths(b, ClipperLib.PolyType.ptClip, true);
+        c.Execute(type, result, ClipperLib.PolyFillType.pftEvenOdd, ClipperLib.PolyFillType.pftEvenOdd);
+        return result;
+    }
+
+    function maskGeometry(layer) {
+        var time=layer.containingComp.time, r=layer.sourceRectAtTime(time,false), scale=1000;
+        function path(points) { var out=[];for(var i=0;i<points.length;i++)out.push({X:Math.round(points[i][0]*scale),Y:Math.round(points[i][1]*scale)});return out; }
+        var source=[path([[r.left,r.top],[r.left+r.width,r.top],[r.left+r.width,r.top+r.height],[r.left,r.top+r.height]])];
+        var area=source, started=false, masks=layer.property("ADBE Mask Parade"), C=ClipperLib.ClipType;
+        if(masks) for(var i=1;i<=masks.numProperties;i++) {
+            var mask=masks.property(i), mode=mask.maskMode;
+            if(mode===MaskMode.NONE)continue;
+            var shape=mask.property("ADBE Mask Shape").valueAtTime(time,false);
+            if(!shape.closed || !shape.vertices.length)continue;
+            var opacity=mask.property("ADBE Mask Opacity").valueAtTime(time,false);
+            if(opacity!==100) throw new Error(layer.name+": partial mask opacity is not supported for geometric bounds.");
+            var contour=[path(flattenMask(shape))];
+            contour=ClipperLib.Clipper.SimplifyPolygons(contour,ClipperLib.PolyFillType.pftEvenOdd);
+            var expansion=mask.property("ADBE Mask Offset").valueAtTime(time,false);
+            if(expansion!==0) {
+                var offset=new ClipperLib.ClipperOffset(2,50), expanded=[];
+                offset.AddPaths(contour,ClipperLib.JoinType.jtRound,ClipperLib.EndType.etClosedPolygon);
+                offset.Execute(expanded,expansion*scale);contour=expanded;
+            }
+            contour=polygonOp(source,contour,mask.inverted?C.ctDifference:C.ctIntersection);
+            if(!started) { area=(mode===MaskMode.SUBTRACT || mode===MaskMode.INTERSECT || mode===MaskMode.DARKEN)?source:[];started=true; }
+            var op;
+            if(mode===MaskMode.ADD || mode===MaskMode.LIGHTEN) op=C.ctUnion;
+            else if(mode===MaskMode.SUBTRACT)op=C.ctDifference;
+            else if(mode===MaskMode.INTERSECT || mode===MaskMode.DARKEN) op=C.ctIntersection;
+            else if(mode===MaskMode.DIFFERENCE)op=C.ctXor;
+            else throw new Error(layer.name+": unsupported mask mode.");
+            area=polygonOp(area,contour,op);
+        }
+        var result=[];
+        for(var p=0;p<area.length;p++)for(var j=0;j<area[p].length;j++)result.push([area[p][j].X/scale,area[p][j].Y/scale]);
+        return result;
+    }
+
+    function moveLayerByCompDelta(layer, dx, dy, evalr) {
+        var pos=layer.property("ADBE Transform Group").property("ADBE Position"),time=layer.containingComp.time;
+        var original=getPositionValueAtCompTime(pos,layer.containingComp),state=snapshotPosition(pos,time);
+        var step=0.5, p0=evalr.point(anchorExpr(layer)),px,py;
+        try {
+            setPositionValue(pos,original[0]+step,original[1],original,time);px=evalr.point(anchorExpr(layer));
+            restorePosition(state);
+            setPositionValue(pos,original[0],original[1]+step,original,time);py=evalr.point(anchorExpr(layer));
+        } finally { restorePosition(state); }
+        var ax=(px[0]-p0[0])/step,ay=(px[1]-p0[1])/step,bx=(py[0]-p0[0])/step,by=(py[1]-p0[1])/step;
+        var det=ax*by-ay*bx;
+        if(Math.abs(det)<1e-10)throw new Error(layer.name+": Position cannot move in both screen axes (expression or edge-on parent/camera).");
+        var x=(dx*by-dy*bx)/det,y=(ax*dy-ay*dx)/det;
+        if(!isFinite(x)||!isFinite(y))throw new Error(layer.name+": invalid movement.");
+        setPositionValue(pos,original[0]+x,original[1]+y,original,time);
+    }
+
+    function moveLayerMetricTo(layer, metric, target, evalr) {
+        var b=getLayerBounds(layer,evalr);
+        for(var i=0;i<20;i++) {
+            var delta=target-b[metric];
+            if(Math.abs(delta)<=0.1)return;
+            moveLayerByCompDelta(layer,metricAxis(metric)==="x"?delta:0,metricAxis(metric)==="y"?delta:0,evalr);
+            b=getLayerBounds(layer,evalr);
+        }
+        throw new Error(layer.name+": alignment did not converge.");
+    }
+
+    function parentDepth(layer) {
+        var n=0;while(layer.parent){n++;layer=layer.parent;}return n;
+    }
+
+    function solveTargets(tasks, evalr) {
+        tasks.sort(function(a,b){return parentDepth(a.layer)-parentDepth(b.layer);});
+        for(var pass=0;pass<20;pass++) {
+            var worst=0;
+            for(var i=0;i<tasks.length;i++) {
+                var t=tasks[i],b=getLayerBounds(t.layer,evalr),dx=0,dy=0;
+                if(t.x!==undefined)dx=t.x-b[t.xMetric||"hcenter"];
+                if(t.y!==undefined)dy=t.y-b[t.yMetric||"vcenter"];
+                worst=Math.max(worst,Math.abs(dx),Math.abs(dy));
+                if(Math.abs(dx)>0.1 || Math.abs(dy)>0.1)moveLayerByCompDelta(t.layer,dx,dy,evalr);
+            }
+            if(worst<=0.1)return;
+        }
+        for(var j=0;j<tasks.length;j++) {
+            var task=tasks[j],bounds=getLayerBounds(task.layer,evalr);
+            if((task.x!==undefined&&Math.abs(task.x-bounds[task.xMetric||"hcenter"])>0.25)||
+                (task.y!==undefined&&Math.abs(task.y-bounds[task.yMetric||"vcenter"])>0.25))throw new Error("Alignment did not converge; changes reverted.");
+        }
+    }
+
+    function withOperation(comp, layers, mode, action) {
+        var selection=comp.selectedLayers,states=[],camera=null,evalr=null,error=null;
+        for(var i=0;i<layers.length;i++) states.push(snapshotPosition(layers[i].property("ADBE Transform Group").property("ADBE Position"),comp.time));
+        app.beginUndoGroup(SCRIPT_NAME);
+        try {
+            if(mode===REF_SELECTED_CAMERA)camera=beginSelectedCameraContext(comp,selection);
+            evalr=makeEvaluator(comp);action(evalr);
+        } catch(err) {
+            error=err;
+            for(var j=states.length-1;j>=0;j--) {try{restorePosition(states[j]);}catch(restoreError){error=new Error(err.toString()+"; rollback failed: "+restoreError.toString());}}
+        } finally {
+            try {if(evalr)evalr.remove();} catch(cleanError){if(!error)error=cleanError;}
+            try {if(camera)camera.restore();} catch(cameraError){if(!error)error=cameraError;}
+            try {restoreSelection(selection);} finally {app.endUndoGroup();}
+        }
+        if(error)alert("3D Align: "+error.toString());
+    }
+
+    function runAlign(metric, alignToIndex, asGroup) {
+        var comp=getActiveComp();if(!comp)return;
+        var layers=getMovableLayers(comp,1);if(!layers)return;
+        var mode=layers.length===1&&alignToIndex===REF_SELECTION?REF_COMPOSITION:alignToIndex;
+        if(asGroup)mode=REF_COMPOSITION;
+        withOperation(comp,layers,mode,function(evalr){
+            var ref=getReferenceBounds(comp,layers,mode,evalr),tasks=[],group;
+            if(asGroup)group=getSelectionBounds(layers,evalr);
+            for(var i=0;i<layers.length;i++) {
+                var b=getLayerBounds(layers[i],evalr),t={layer:layers[i]};
+                if(asGroup){t.x=b.hcenter+ref.hcenter-group.hcenter;t.y=b.vcenter+ref.vcenter-group.vcenter;}
+                else if(mode===REF_FIRST_SELECTED&&i===0){t.x=b.hcenter;t.y=b.vcenter;}
+                else if(metric==="center"){t.x=ref.hcenter;t.y=ref.vcenter;}
+                else if(metricAxis(metric)==="x"){t.xMetric=metric;t.x=ref[metric];}
+                else{t.yMetric=metric;t.y=ref[metric];}
+                tasks.push(t);
+            }
+            solveTargets(tasks,evalr);
+            if(asGroup) {
+                for(var pass=0;pass<20;pass++) {
+                    var current=getSelectionBounds(layers,evalr),dx=ref.hcenter-current.hcenter,dy=ref.vcenter-current.vcenter;
+                    if(Math.abs(dx)<=0.25&&Math.abs(dy)<=0.25)return;
+                    for(var j=0;j<tasks.length;j++){tasks[j].x+=dx;tasks[j].y+=dy;}
+                    solveTargets(tasks,evalr);
+                }
+                throw new Error("Group centering did not converge; changes reverted.");
+            }
+        });
+    }
+
+    function runDistribute(metric, mode) {
+        var comp=getActiveComp();if(!comp)return;
+        var layers=getMovableLayers(comp,3);if(!layers)return;
+        withOperation(comp,layers,mode,function(evalr){
+            var items=[];
+            for(var i=0;i<layers.length;i++){var b=getLayerBounds(layers[i],evalr);items.push({layer:layers[i],bounds:b,value:b[metric]});}
+            if(metric==="hcenter"||metric==="vcenter")distributeGaps(items,metric,evalr);
+            else distributeMetric(items,metric,evalr);
+        });
+    }
+
+    function beginSelectedCameraContext(comp, selectedLayers) {
+        var selected=null;
+        for(var s=0;s<selectedLayers.length;s++)if(isCameraLayer(selectedLayers[s])) {
+            if(selected)throw new Error("Select exactly one camera.");selected=selectedLayers[s];
+        }
+        if(!selected)throw new Error("Select a camera together with the layers.");
+        if(comp.time<selected.inPoint || comp.time>=selected.outPoint)throw new Error("Selected camera is outside its in/out range.");
+        var states=[];
+        function restore(){for(var j=0;j<states.length;j++){var st=states[j];st.layer.locked=false;st.layer.enabled=st.enabled;st.layer.locked=st.locked;}}
+        try {
+            for(var i=1;i<=comp.numLayers;i++) {
+                var layer=comp.layer(i);
+                if(isCameraLayer(layer)) {
+                    states.push({layer:layer,enabled:layer.enabled,locked:layer.locked});
+                    layer.locked=false;layer.enabled=layer===selected;layer.locked=states[states.length-1].locked;
+                }
+            }
+            if(comp.activeCamera!==selected)throw new Error("Selected camera could not become active.");
+        } catch(err){restore();throw err;}
+        return {restore:restore};
+    }
+
+    function distributeMetric(items, metric, evalr) {
+        items.sort(function(a,b){return a.value-b.value;});
+        var tasks=[],gap=(items[items.length-1].value-items[0].value)/(items.length-1);
+        for(var i=0;i<items.length;i++) {
+            var t={layer:items[i].layer},target=items[0].value+gap*i;
+            if(metricAxis(metric)==="x"){t.x=target;t.xMetric=metric;}else{t.y=target;t.yMetric=metric;}
+            tasks.push(t);
+        }
+        solveTargets(tasks,evalr);
+    }
+
+    function distributeGaps(items, metric, evalr) {
+        var horizontal=metric==="hcenter",start=horizontal?"left":"top",end=horizontal?"right":"bottom";
+        items.sort(function(a,b){return a.bounds[start]-b.bounds[start];});
+        var first=items[0].bounds[start],last=items[items.length-1].bounds[end];
+        for(var pass=0;pass<25;pass++) {
+            var total=0,sizes=[],tasks=[];
+            for(var i=0;i<items.length;i++){var b=getLayerBounds(items[i].layer,evalr);sizes.push(b[end]-b[start]);total+=sizes[i];}
+            var gap=(last-first-total)/(items.length-1),cursor=first;
+            for(i=0;i<items.length;i++) {
+                var t={layer:items[i].layer},key=i===items.length-1?end:start,target=i===items.length-1?last:cursor;
+                if(horizontal){t.x=target;t.xMetric=key;}else{t.y=target;t.yMetric=key;}
+                tasks.push(t);cursor+=sizes[i]+gap;
+            }
+            solveTargets(tasks,evalr);
+            var previous=getLayerBounds(items[0].layer,evalr),min=1e30,max=-1e30;
+            for(i=1;i<items.length;i++){b=getLayerBounds(items[i].layer,evalr);var actual=b[start]-previous[end];min=Math.min(min,actual);max=Math.max(max,actual);previous=b;}
+            if(max-min<=0.25)return;
+        }
+        throw new Error("Equal gaps did not converge; changes reverted.");
+    }

@@ -2,3 +2,5 @@
 *.log
 *.tmp
 *.bak
+.publish/
+tests/artifacts/*.txt
